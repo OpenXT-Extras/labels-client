@@ -1,0 +1,156 @@
+#!/bin/bash
+#
+# Copyright (c) 2014 Citrix Systems, Inc.
+# 
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+
+cd /home/xc_assets/scripts || exit 1
+
+PATH="$PATH:/usr/local/bin"
+
+#exec 2> /tmp/log
+
+BY_ID="/home/xc_assets/data/by_id"
+BY_MAC="/home/xc_assets/data/by_mac"
+BY_HAM="/home/xc_assets/data/by_ham"
+SCRIPTS_DIR="/home/xc_assets/scripts/scan"
+
+do_scan()
+{
+	local SCAN_DIR="$1"
+	local SCRIPT
+	local SCRIPT_NAME
+	
+	echo ${MAC} 		>  "${SCAN_DIR}/mac"
+
+	for SCRIPT in "${SCRIPTS_DIR}"/*; do
+		SCRIPT_NAME=$(basename ${SCRIPT})
+		
+		mkdir -p "${SCAN_DIR}/${SCRIPT_NAME}"
+		"${SCRIPT}" "${SCAN_DIR}/${SCRIPT_NAME}"
+	done
+
+	cp /sys/class/dmi/id/product_name	"${SCAN_DIR}/model"
+	
+}
+
+new_id()
+{
+  local a=1
+  local ID
+  while [ $a -eq 1 -o -d "${BY_ID}/${ID}" ]; do
+    a=0
+    ID=$( printf "%02x%02x%02x%02x"  $[ $RANDOM % 256 ] $[ $RANDOM % 256 ] $[ $RANDOM % 256 ] $[ $RANDOM % 256 ] )
+  done
+  echo ${ID}
+}
+
+
+
+if [ ! -f /sys/class/net/eth0/address ]; then
+	dialog --msgbox "Can't find eth0" 0 0
+	poweroff -n -f 
+	exit 1
+fi
+
+MAC=$(cat /sys/class/net/eth0/address | tr a-f A-F)
+MAC_DIR="${BY_MAC}/${MAC}"
+
+if [ -d "${MAC_DIR}" ]; then
+	ID=$(basename $(readlink "${MAC_DIR}"))
+	ID_DIR="${BY_ID}/${ID}"
+
+	if [ ! -d "${ID_DIR}" ]; then 
+		dialog --msgbox "Mac ${MAC} points to unknown ID ${ID_DIR}" 0 0
+		poweroff -n -f 
+		exit 1
+	fi
+
+	NEW=0
+	LABEL=0
+
+else 
+	dialog --msgbox "new machine press enter to continue" 0 0 
+
+	ID=$( new_id )
+	ID_DIR="${BY_ID}/${ID}"
+
+	NEW=1
+	LABEL=1
+
+	mkdir -p ${ID_DIR}
+
+	rm -f ${MAC_DIR}
+	ln -sf "../by_id/${ID}" ${MAC_DIR}
+fi
+
+HAM=$( ./ham.pl "${ID}" )
+HAM_DIR="${BY_HAM}/${HAM}"
+
+echo "${HAM}"  > "${ID_DIR}/ham"
+echo "${MAC}"  > "${ID_DIR}/mac"
+
+rm -f "${HAM_DIR}"
+ln -s "../by_id/${ID}" "${HAM_DIR}"
+
+TYPE=$(<"${ID_DIR}/current/model")
+
+if [ ${NEW} -eq 0 ]; then
+
+	#exec 3>&1
+	#Q=$( dialog --menu "This MAC address already seen (${MAC}) tagged as ${HAM} which is possibly a ${TYPE}, please check this is the same machine"  0 0 0 "rescan" "make a new hardware scan of this machine" "reprint" "reprint the label, and rescan" "abort"   "power off the computer"  2>&1 1>&3  )
+	Q=$( dialog --stdout --menu "This MAC address already seen (${MAC}) tagged as ${HAM} which is possibly a ${TYPE}, please check this is the same machine"  0 0 0 "rescan" "make a new hardware scan of this machine" "reprint" "reprint the label, and rescan" "image" "image the disks"  "restore" "write disks from image" "abort"   "power off the computer"  )
+
+	case "${Q}" in
+		rescan)
+			;;
+		reprint) 
+			LABEL=1
+			;;
+		image)
+			/home/xc_factory_images/scripts/image "${ID}" "${TYPE}" "${HAM}"
+			exit 0	
+			;;
+		restore)
+			/home/xc_factory_images/scripts/restore "${ID}" "${TYPE}" "${HAM}"
+			exit 0	
+			;;
+		*)
+			poweroff -n -f
+			exit 0
+			;;
+	esac
+fi
+
+
+
+TS=$( date +%Y-%m-%d--%H-%M-%S )
+TS_DIR="${ID_DIR}/${TS}"
+mkdir -p "${TS_DIR}"
+
+do_scan "${TS_DIR}"
+ln -sf "${TS}" "${ID_DIR}/current"
+
+
+if [ "${LABEL}" -eq 1 ]; then
+	wget "http://labels/?label=${HAM}"  -O /tmp/label.png
+	dialog --msgbox "Please collect label ${HAM} and attach it to the machine" 0 0 
+fi
+
+dialog --msgbox "All done" 0 0 
+
+exit 0
+
